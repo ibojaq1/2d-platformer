@@ -3,6 +3,7 @@ const config = require('./config');
 const db = require('./db');
 const scraper = require('./scraper');
 const sportybet = require('./sportybet');
+const payment = require('./payment');
 
 function createBot() {
   const bot = new TelegramBot(config.telegram.token, { polling: true });
@@ -12,6 +13,8 @@ function createBot() {
   bot.onText(/\/status/, (msg) => handleStatus(bot, msg));
   bot.onText(/\/help/, (msg) => handleHelp(bot, msg));
   bot.onText(/\/subscribe/, (msg) => handleSubscribe(bot, msg));
+  bot.onText(/\/pay\s+(.+)/, (msg, match) => handlePay(bot, msg, match));
+  bot.onText(/\/verify\s+(.+)/, (msg, match) => handleVerify(bot, msg, match));
 
   bot.on('polling_error', err => console.error('[bot] Polling error:', err.message));
 
@@ -30,19 +33,19 @@ async function handleStart(bot, msg, match) {
   }
 
   await bot.sendMessage(chatId, [
-    `🎯 *Welcome to BetCode, ${escMd(username)}!*`,
+    `*Welcome to BetCode, ${esc(username)}\\!*`,
     '',
-    'I turn NerdyTips Trust BestTip predictions into SportyBet booking codes — in under 90 seconds.',
+    'I turn NerdyTips Trust BestTip predictions into SportyBet booking codes — in under 90 seconds\\.',
     '',
     '*Commands:*',
     '`/generate 15` — Generate a betslip with 15 matches',
-    '`/status` — Check your plan & usage',
+    '`/status` — Check your plan \\& usage',
     '`/subscribe` — Upgrade to Premium',
     '`/help` — Show this message',
     '',
-    '_Free tier: 5 matches per slip, 2 slips/day._',
-    '_Premium: unlimited matches, filters, tomorrow\'s games._',
-  ].join('\n'), { parse_mode: 'Markdown' });
+    '_Free tier: 5 matches per slip, 2 slips/day\\._',
+    '_Premium: unlimited matches, filters, tomorrow games\\._',
+  ].join('\n'), { parse_mode: 'MarkdownV2' });
 }
 
 async function handleGenerate(bot, msg, match) {
@@ -89,13 +92,13 @@ async function handleGenerate(bot, msg, match) {
     const picked = scraper.pickMatches(predictions, requested);
 
     await bot.editMessageText(
-      `⏳ Found *${predictions.length}* predictions. Placing *${picked.length}* on SportyBet...\n\n_Matching events & markets..._`,
+      `⏳ Found *${predictions.length}* predictions. Placing *${picked.length}* on SportyBet...\n\n_Matching events & selecting correct markets..._`,
       { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
     );
 
-    const selections = await sportybet.resolveSelections(picked);
-    const matched = selections.filter(s => s.matched);
-    const unmatched = selections.filter(s => !s.matched);
+    const { results, bookingCode } = await sportybet.generateBookingCode(picked);
+    const matched = results.filter(r => r.matched);
+    const unmatched = results.filter(r => !r.matched);
 
     if (matched.length === 0) {
       return bot.editMessageText(
@@ -104,16 +107,9 @@ async function handleGenerate(bot, msg, match) {
       );
     }
 
-    await bot.editMessageText(
-      `⏳ Matched *${matched.length}/${picked.length}* events. Creating booking code...`,
-      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
-    );
-
-    const bookingCode = await sportybet.createBookingCode(matched);
-
     if (!bookingCode) {
       return bot.editMessageText(
-        '❌ Failed to generate booking code from SportyBet. Please try again.',
+        '❌ Selections were added but failed to generate a booking code. Please try again.',
         { chat_id: chatId, message_id: statusMsg.message_id }
       );
     }
@@ -125,11 +121,11 @@ async function handleGenerate(bot, msg, match) {
       : '—';
 
     const matchLines = matched.map((m, i) =>
-      `${i + 1}. ${escMd(m.home)} vs ${escMd(m.away)} — *${escMd(m.market)}* (Trust ${m.trust}/10)`
+      `${i + 1}. ${m.home} vs ${m.away} — *${m.bestTip}* → ${m.marketTab} ${m.marketPick}${m.specifier ? ' ' + m.specifier : ''} (Trust ${m.trust}/10)`
     ).join('\n');
 
     const unmatchedNote = unmatched.length > 0
-      ? `\n\n⚠️ _${unmatched.length} match(es) couldn't be found on SportyBet and were skipped._`
+      ? `\n\n⚠️ _${unmatched.length} match(es) skipped: not found on SportyBet._`
       : '';
 
     await bot.editMessageText([
@@ -151,9 +147,9 @@ async function handleGenerate(bot, msg, match) {
   } catch (err) {
     console.error('[bot] Generate error:', err);
     await bot.editMessageText(
-      '❌ Something went wrong. Please try again in a minute.',
+      `❌ Error: ${err.message || 'Something went wrong. Please try again in a minute.'}`,
       { chat_id: chatId, message_id: statusMsg.message_id }
-    );
+    ).catch(() => {});
   }
 }
 
@@ -205,22 +201,91 @@ async function handleSubscribe(bot, msg) {
     '✅ Tomorrow\'s matches',
     '✅ Priority processing',
     '',
-    '*To subscribe:*',
-    '1️⃣ Transfer ₦3,000 to the account below',
-    '2️⃣ Send your payment receipt here',
-    '3️⃣ Get activated within minutes',
+    '*To pay, send:*',
+    '`/pay your@email.com`',
     '',
-    '_Payment details will be provided by admin. Contact @BetCodeSupport._',
+    'You\'ll get a Paystack payment link. After payment, your Premium is activated automatically.',
   ].join('\n'), { parse_mode: 'Markdown' });
+}
+
+async function handlePay(bot, msg, match) {
+  const chatId = msg.chat.id;
+  const email = (match[1] || '').trim();
+
+  if (!email || !email.includes('@')) {
+    return bot.sendMessage(chatId, '❌ Please provide a valid email: `/pay your@email.com`', { parse_mode: 'Markdown' });
+  }
+
+  db.ensureUser(chatId, msg.from.username);
+  db.setEmail(chatId, email);
+
+  if (db.isPremium(chatId)) {
+    return bot.sendMessage(chatId, '💎 You\'re already on Premium!');
+  }
+
+  if (!config.paystack.secretKey) {
+    return bot.sendMessage(chatId, '❌ Payment system is not configured. Contact admin.');
+  }
+
+  try {
+    const { paymentUrl, reference } = await payment.initializePayment(chatId, email);
+
+    await bot.sendMessage(chatId, [
+      `💳 *Payment Link Ready*`,
+      '',
+      `Amount: *₦3,000*`,
+      `Reference: \`${reference}\``,
+      '',
+      `[Click here to pay](${paymentUrl})`,
+      '',
+      'After payment, send `/verify ' + reference + '` to activate Premium.',
+      '',
+      '_Payment is processed securely via Paystack._',
+    ].join('\n'), { parse_mode: 'Markdown', disable_web_page_preview: true });
+  } catch (err) {
+    console.error('[bot] Payment init error:', err);
+    await bot.sendMessage(chatId, `❌ Could not create payment link: ${err.message}`);
+  }
+}
+
+async function handleVerify(bot, msg, match) {
+  const chatId = msg.chat.id;
+  const reference = (match[1] || '').trim();
+
+  if (!reference) {
+    return bot.sendMessage(chatId, '❌ Please provide a reference: `/verify REF_CODE`', { parse_mode: 'Markdown' });
+  }
+
+  try {
+    const result = await payment.verifyPayment(reference);
+
+    if (result.verified) {
+      await bot.sendMessage(chatId, [
+        '✅ *Payment verified! Premium activated!*',
+        '',
+        '💎 You now have unlimited access for 30 days.',
+        '',
+        'Try it out: `/generate 20`',
+      ].join('\n'), { parse_mode: 'Markdown' });
+    } else {
+      await bot.sendMessage(chatId,
+        `❌ Payment not confirmed yet. Status: *${result.status}*\n\nIf you've paid, wait a moment and try again.`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  } catch (err) {
+    console.error('[bot] Verify error:', err);
+    await bot.sendMessage(chatId, `❌ Could not verify payment: ${err.message}`);
+  }
 }
 
 async function handleHelp(bot, msg) {
   return handleStart(bot, msg, ['', '']);
 }
 
-function escMd(text) {
+function esc(text) {
   if (!text) return '';
-  return String(text).replace(/([_*[\]()~`>#+\-=|{}.!])/g, '\\$1');
+  return String(text).replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
 module.exports = { createBot };

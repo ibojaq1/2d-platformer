@@ -11,19 +11,31 @@ db.pragma('journal_mode = WAL');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
-    chat_id   INTEGER PRIMARY KEY,
-    username  TEXT,
-    plan      TEXT DEFAULT 'free',
+    chat_id        INTEGER PRIMARY KEY,
+    username       TEXT,
+    email          TEXT,
+    plan           TEXT DEFAULT 'free',
     plan_expires_at TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at     TEXT DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS slips (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id    INTEGER NOT NULL,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
     match_count INTEGER NOT NULL,
     booking_code TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at  TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (chat_id) REFERENCES users(chat_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS payments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
+    reference   TEXT UNIQUE NOT NULL,
+    status      TEXT DEFAULT 'pending',
+    amount_kobo INTEGER,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (chat_id) REFERENCES users(chat_id)
   );
 `);
@@ -34,6 +46,7 @@ const stmts = {
     ON CONFLICT(chat_id) DO UPDATE SET username = excluded.username
   `),
   getUser: db.prepare('SELECT * FROM users WHERE chat_id = ?'),
+  setEmail: db.prepare('UPDATE users SET email = ? WHERE chat_id = ?'),
   setPlan: db.prepare(`
     UPDATE users SET plan = ?, plan_expires_at = ? WHERE chat_id = ?
   `),
@@ -44,6 +57,18 @@ const stmts = {
     SELECT COUNT(*) AS cnt FROM slips
     WHERE chat_id = ? AND date(created_at) = date('now')
   `),
+  insertPayment: db.prepare(`
+    INSERT INTO payments (chat_id, reference, status, amount_kobo)
+    VALUES (?, ?, ?, ?)
+  `),
+  updatePayment: db.prepare(`
+    UPDATE payments SET status = ?, updated_at = datetime('now')
+    WHERE reference = ?
+  `),
+  getPayment: db.prepare('SELECT * FROM payments WHERE reference = ?'),
+  getPaymentsByChatId: db.prepare(
+    'SELECT * FROM payments WHERE chat_id = ? ORDER BY created_at DESC LIMIT 10'
+  ),
 };
 
 function ensureUser(chatId, username) {
@@ -52,6 +77,10 @@ function ensureUser(chatId, username) {
 
 function getUser(chatId) {
   return stmts.getUser.get(chatId);
+}
+
+function setEmail(chatId, email) {
+  stmts.setEmail.run(email, chatId);
 }
 
 function isPremium(chatId) {
@@ -78,4 +107,27 @@ function slipsToday(chatId) {
   return stmts.countSlipsToday.get(chatId).cnt;
 }
 
-module.exports = { ensureUser, getUser, isPremium, setPremium, recordSlip, slipsToday };
+function recordPayment(chatId, reference, status, amountKobo) {
+  stmts.insertPayment.run(chatId, reference, status, amountKobo);
+}
+
+function updatePayment(reference, status) {
+  stmts.updatePayment.run(status, reference);
+}
+
+function getPayment(reference) {
+  return stmts.getPayment.get(reference);
+}
+
+module.exports = {
+  ensureUser,
+  getUser,
+  setEmail,
+  isPremium,
+  setPremium,
+  recordSlip,
+  slipsToday,
+  recordPayment,
+  updatePayment,
+  getPayment,
+};
