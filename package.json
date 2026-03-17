@@ -1,0 +1,26 @@
+{
+  "name": "betcode",
+  "version": "1.0.0",
+  "description": "AI-powered Telegram bot that converts NerdyTips predictions into SportyBet booking codes",
+  "main": "bot/index.js",
+  "scripts": {
+    "start": "node bot/index.js",
+    "dev": "node --watch bot/index.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "sportybet",
+    "betting",
+    "nerdytips"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.13.6",
+    "better-sqlite3": "^12.8.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "node-telegram-bot-api": "^0.67.0"
+  }
+}
